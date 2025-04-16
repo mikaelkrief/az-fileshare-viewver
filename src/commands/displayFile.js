@@ -3,13 +3,14 @@ const blessed = require('blessed');
 const chalk = require('chalk');
 
 /**
- * Display the contents of a file
+ * Display file content with options for streaming
  * @param {string} shareName - Name of the file share
  * @param {string} filePath - Path to the file
+ * @param {boolean} streamMode - Whether to stream updates in real-time
  */
-async function displayFile(shareName, filePath) {
+async function displayFile(shareName, filePath, streamMode = false) {
   try {
-    console.log(chalk.cyan(`Loading file: ${filePath}...`));
+    console.log(chalk.cyan(`Loading file: ${filePath}...${streamMode ? ' (streaming mode)' : ''}`));
     
     const shareClient = getShareClient(shareName);
     const filePathParts = filePath.split('/');
@@ -24,6 +25,8 @@ async function displayFile(shareName, filePath) {
     }
     
     const fileClient = directoryClient.getFileClient(fileName);
+
+    // Initial file content download
     const downloadResponse = await fileClient.download(0);
     
     // Convert readableStream to string
@@ -34,8 +37,28 @@ async function displayFile(shareName, filePath) {
     const buffer = Buffer.concat(chunks);
     const fileContent = buffer.toString();
     
+    // Determine whether streaming mode should be offered based on file type
+    const isLog = isLogFile(fileContent, filePath);
+    const canStream = isLog; // Only offer streaming for log files
+    
+    if (streamMode && !canStream) {
+      console.log(chalk.yellow(`Streaming mode is only available for log files.`));
+      streamMode = false;
+    }
+    
     // Apply syntax highlighting and display file content in a pager-like interface
-    await displayContentInPager(fileContent, filePath);
+    if (streamMode) {
+      await displayContentWithStreaming(fileContent, filePath, fileClient);
+    } else {
+      // Pass the shareName to the pager function
+      const result = await displayContentInPager(fileContent, filePath, canStream, shareName);
+      
+      // Check if we should switch to streaming mode
+      if (result && result.switchToStream) {
+        // Recall this function with streaming mode enabled
+        await displayFile(shareName, filePath, true);
+      }
+    }
     
   } catch (error) {
     console.error(chalk.red(`Error displaying file ${filePath}: ${error.message}`));
@@ -158,11 +181,13 @@ function isJsonFile(content, fileName) {
 }
 
 /**
- * Display content in a pager-like interface
+ * Display content in a pager-like interface, with option to switch to streaming mode
  * @param {string} content - File content
  * @param {string} fileName - Name of the file
+ * @param {boolean} canStream - Whether streaming mode can be offered
+ * @param {string} shareName - The name of the share containing this file
  */
-async function displayContentInPager(content, fileName) {
+async function displayContentInPager(content, fileName, canStream = false, shareName) {
   // Create a screen
   const screen = blessed.screen({
     smartCSR: true,
@@ -232,14 +257,14 @@ async function displayContentInPager(content, fileName) {
     }
   });
   
-  // Add instructions at the bottom
+  // Add instructions with streaming option if available
   const instructions = blessed.box({
     parent: screen,
     bottom: 0,
     left: 0,
     width: '100%',
     height: 1,
-    content: ' ↑/↓/PgUp/PgDn: Scroll | /: Search | n/N: Next/Prev Match | q: Quit ',
+    content: ` ↑/↓/PgUp/PgDn: Scroll | /: Search | n/N: Next/Prev Match | q: Quit ${canStream ? ' | s: Stream' : ''} `,
     style: {
       fg: 'black',
       bg: 'green'
@@ -251,136 +276,222 @@ async function displayContentInPager(content, fileName) {
     logWidget.add(line);
   });
   
+  // Scroll to the bottom by default for logs
+  if (isLog) {
+    logWidget.setScrollPerc(100);
+  }
+  
   // Focus the log widget
   logWidget.focus();
   
-  // Quit on q or ESC
-  screen.key(['q', 'escape'], function() {
-    if (!searchMode) {
+  // Fix the streaming mode key handler
+  if (canStream) {
+    screen.key(['s'], async function() {
+      // Important: Destroy the screen AFTER resolving the promise
+      const result = new Promise(resolve => {
+        // First set a flag that we're switching to stream mode
+        resolve({ switchToStream: true });
+      });
+      
       screen.destroy();
+      return result;
+    });
+  }
+  
+  // Wait for the user to quit or switch to streaming mode
+  return new Promise(resolve => {
+    // Quit handler
+    screen.key(['q', 'escape'], function() {
+      if (!searchMode) {
+        screen.destroy();
+        resolve({ switchToStream: false });
+      }
+    });
+
+    // Add the streaming handler result capture
+    if (canStream) {
+      screen.key(['s'], function() {
+        screen.destroy();
+        resolve({ switchToStream: true });
+      });
+    }
+  });
+}
+
+/**
+ * Display content with real-time streaming updates
+ * @param {string} initialContent - Initial file content
+ * @param {string} fileName - Name of the file
+ * @param {object} fileClient - Azure File Client for the file
+ */
+async function displayContentWithStreaming(initialContent, fileName, fileClient) {
+  // Create a screen
+  const screen = blessed.screen({
+    smartCSR: true,
+    title: `File: ${fileName} (Streaming)`,
+    fullUnicode: true
+  });
+  
+  // Create a log widget for displaying file contents
+  const logWidget = blessed.log({
+    parent: screen,
+    top: 1,
+    left: 0,
+    width: '100%',
+    height: screen.height - 2,
+    border: {
+      type: 'line'
+    },
+    scrollable: true,
+    alwaysScroll: true,
+    scrollbar: {
+      style: {
+        bg: 'blue'
+      }
+    },
+    mouse: true,
+    keys: true,
+    vi: true,
+    tags: true,
+    style: {
+      fg: 'white',
+      bg: 'black',
+      border: {
+        fg: 'blue'
+      }
     }
   });
   
-  // Add page up/down support
-  logWidget.key(['pageup'], function() {
-    logWidget.setScroll(Math.max(0, logWidget.getScroll() - logWidget.height));
-    screen.render();
+  // Add a title with streaming indicator (red background)
+  const title = blessed.box({
+    parent: screen,
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: 1,
+    content: ` File: ${fileName} [STREAMING] `,
+    style: {
+      fg: 'white',
+      bg: 'red'  // Red background to make it clear we're in streaming mode
+    }
   });
   
-  logWidget.key(['pagedown'], function() {
-    logWidget.setScroll(logWidget.getScroll() + logWidget.height);
-    screen.render();
-  });
-  
-  // Handle search functionality
-  let searchMode = false;
-  let searchInput = '';
-  let searchPosition = -1;
-  let searchMatches = [];
-  
-  // Search box for /pattern functionality
-  const searchBox = blessed.textbox({
+  // Add instructions
+  const instructions = blessed.box({
     parent: screen,
     bottom: 0,
     left: 0,
     width: '100%',
     height: 1,
-    inputOnFocus: true,
+    content: ' ↑/↓: Scroll | Space: Pause/Resume | q: Quit ',
     style: {
-      fg: 'white',
-      bg: 'blue'
+      fg: 'black',
+      bg: 'green'
     }
   });
   
-  // Make the search box invisible by default
-  searchBox.hide();
-  
-  // Handle search key
-  screen.key(['/', 'n', 'N'], function(ch, key) {
-    if (key.name === '/') {
-      // Enter search mode
-      searchMode = true;
-      searchInput = '';
-      searchBox.setValue('/');
-      searchBox.show();
-      instructions.hide(); // Hide instructions while searching
-      searchBox.focus();
-      screen.render();
-    } else if (key.name === 'n' || key.name === 'N') {
-      // Find next/previous match
-      if (searchMatches.length) {
-        if (key.name === 'n') {
-          searchPosition = (searchPosition + 1) % searchMatches.length;
-        } else {
-          searchPosition = (searchPosition - 1 + searchMatches.length) % searchMatches.length;
-        }
-        
-        // Scroll to the match position
-        logWidget.setScroll(searchMatches[searchPosition]);
-        screen.render();
-      }
-    }
+  // Load the initial content into the log widget
+  initialContent.split('\n').forEach(line => {
+    logWidget.add(highlightLogLine(line));
   });
   
-  // Handle search submission
-  searchBox.key(['enter'], function() {
-    const searchText = searchBox.getValue().substring(1); // Remove the leading '/'
-    searchBox.hide();
-    instructions.show(); // Show instructions again
-    searchMode = false;
-    
-    // Find all matches
-    if (searchText) {
-      try {
-        const regex = new RegExp(searchText, 'gi');
-        const contentLines = content.split('\n');
-        searchMatches = [];
-        
-        contentLines.forEach((line, index) => {
-          if (regex.test(line)) {
-            searchMatches.push(index);
-          }
-        });
-        
-        if (searchMatches.length) {
-          searchPosition = 0;
-          logWidget.setScroll(searchMatches[0]);
-          
-          // Show number of matches in instructions
-          instructions.setContent(` ${searchMatches.length} matches | n/N: Next/Prev | ↑/↓: Scroll | q: Quit `);
-        } else {
-          // No matches
-          instructions.setContent(` No matches found for: "${searchText}" | ↑/↓: Scroll | /: Search | q: Quit `);
-        }
-      } catch (e) {
-        // Invalid regex
-        instructions.setContent(` Invalid pattern: ${e.message} | ↑/↓: Scroll | /: Search | q: Quit `);
-      }
-    }
-    
-    logWidget.focus();
+  // Scroll to the bottom by default
+  logWidget.setScrollPerc(100);
+  
+  // Focus the log widget
+  logWidget.focus();
+  
+  // Add state variables
+  let isPaused = false;
+  let currentSize = initialContent.length;
+  let lastCheckTime = new Date();
+  
+  // Add pause/resume functionality
+  screen.key(['space'], function() {
+    isPaused = !isPaused;
+    title.setContent(` File: ${fileName} [${isPaused ? 'PAUSED' : 'STREAMING'}] `);
     screen.render();
   });
   
-  // Cancel search on escape
-  searchBox.key(['escape'], function() {
-    searchBox.hide();
-    instructions.show();
-    searchMode = false;
-    logWidget.focus();
-    screen.render();
+  // Quit on q or ESC
+  screen.key(['q', 'escape'], function() {
+    clearInterval(streamingInterval);
+    screen.destroy();
   });
   
   // Render the screen
   screen.render();
   
-  // Wait for the user to quit
+  // Start streaming updates with better error handling
+  const streamingInterval = setInterval(async () => {
+    if (isPaused) return;
+    
+    try {
+      // First get the file properties to check size
+      const properties = await fileClient.getProperties();
+      const fileSize = properties.contentLength;
+      
+      // Only try to read if there's new content
+      if (fileSize > currentSize) {
+        logWidget.add(chalk.cyan(`[${new Date().toLocaleTimeString()}] New content detected (${fileSize - currentSize} bytes)`));
+        
+        // Download only the new content
+        const downloadResponse = await fileClient.download(currentSize, fileSize - currentSize);
+        
+        const chunks = [];
+        for await (const chunk of downloadResponse.readableStreamBody) {
+          chunks.push(chunk);
+        }
+        
+        if (chunks.length > 0) {
+          const buffer = Buffer.concat(chunks);
+          const newContent = buffer.toString();
+          
+          newContent.split('\n').forEach(line => {
+            if (line.trim()) { // Skip empty lines
+              logWidget.add(highlightLogLine(line));
+            }
+          });
+          
+          // Update our tracking of the current size
+          currentSize = fileSize;
+          lastCheckTime = new Date();
+          
+          // Update the title with last update time
+          title.setContent(` File: ${fileName} [STREAMING] - Last update: ${lastCheckTime.toLocaleTimeString()} `);
+        }
+        
+        // Auto-scroll to the bottom
+        logWidget.setScrollPerc(100);
+        screen.render();
+      }
+    } catch (error) {
+      // Log the error in the widget instead of crashing
+      logWidget.add(chalk.red(`[${new Date().toLocaleTimeString()}] Error checking for updates: ${error.message}`));
+      logWidget.add(chalk.yellow('Trying again in 2 seconds...'));
+      screen.render();
+      
+      // Reset our position if we got a range error - the file might have been truncated
+      if (error.message.includes('range specified is invalid')) {
+        try {
+          const properties = await fileClient.getProperties();
+          currentSize = properties.contentLength;
+          logWidget.add(chalk.yellow(`[${new Date().toLocaleTimeString()}] Resetting file position to ${currentSize} bytes`));
+          screen.render();
+        } catch (resetError) {
+          logWidget.add(chalk.red(`[${new Date().toLocaleTimeString()}] Error resetting position: ${resetError.message}`));
+          screen.render();
+        }
+      }
+    }
+  }, 2000);
+  
+  // Return a promise that resolves when the user quits
   return new Promise(resolve => {
     screen.key(['q', 'escape'], function() {
-      if (!searchMode) {
-        screen.destroy();
-        resolve();
-      }
+      clearInterval(streamingInterval);
+      screen.destroy();
+      resolve();
     });
   });
 }

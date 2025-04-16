@@ -316,6 +316,7 @@ async function browseShareContents(shareName, directory = '') {
 
 /**
  * Browse files within a grouped set of log files
+ * with streaming mode for the most recent file
  */
 async function browseFileGroup(shareName, directory, group) {
   try {
@@ -324,12 +325,25 @@ async function browseFileGroup(shareName, directory, group) {
     
     // Create choices for the group's files
     const choices = [
-      { name: chalk.blue('.. (Back to file list)'), value: 'back' },
-      ...group.files.map(file => ({
+      { name: chalk.blue('.. (Back to file list)'), value: 'back' }
+    ];
+    
+    // Add streaming option for the most recent log file
+    const mostRecentFile = group.files[0]; // First file is the newest after sorting
+    if (mostRecentFile) {
+      choices.push({
+        name: `${chalk.red('🔴 ')} ${mostRecentFile.name} (Stream real-time)`,
+        value: { ...mostRecentFile, stream: true }
+      });
+    }
+    
+    // Add all files
+    group.files.forEach(file => {
+      choices.push({
         name: `- ${file.name}`,
         value: file
-      }))
-    ];
+      });
+    });
     
     // Prompt user to select a file
     const { selectedFile } = await inquirer.prompt([
@@ -348,7 +362,11 @@ async function browseFileGroup(shareName, directory, group) {
     } else {
       // Display the selected file
       const path = directory ? `${directory}/${selectedFile.name}` : selectedFile.name;
-      await displayFile(shareName, path);
+      
+      // Check if streaming mode was selected
+      const streamMode = selectedFile.stream === true;
+      
+      await displayFile(shareName, path, streamMode);
       
       // After viewing file, return to the group
       await browseFileGroup(shareName, directory, group);
