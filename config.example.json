@@ -1,0 +1,13 @@
+{
+  "currentAccount": "account1",
+  "accounts": {
+    "account1": {
+      "accountName": "your_storage_account_name_1",
+      "accountKey": "your_storage_account_key_1"
+    },
+    "account2": {
+      "accountName": "your_storage_account_name_2",
+      "accountKey": "your_storage_account_key_2"
+    }
+  }
+}
