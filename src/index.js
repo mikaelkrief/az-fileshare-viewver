@@ -134,7 +134,8 @@ async function browseFileShares() {
 }
 
 /**
- * Browse the contents of the selected share using inquirer instead of blessed
+ * Browse the contents of the selected share using inquirer
+ * with file grouping by name
  */
 async function browseShareContents(shareName, directory = '') {
   try {
@@ -161,28 +162,127 @@ async function browseShareContents(shareName, directory = '') {
     console.log(chalk.blue(`\n${account.accountName} : ${chalk.green(shareName)}${directory ? '/' + chalk.yellow(directory) : ''}`));
     console.log(`${chalk.dim('Total items:')} ${items.length}\n`);
     
-    // Create choices for inquirer
-    const choices = [
-      ...(directory ? [{ name: chalk.blue('.. (Go back)'), value: 'back' }] : []),
-      ...items.map(item => ({
-        name: `${item.isDirectory ? chalk.blue('+ ') : '- '}${item.name}`,
-        value: item
-      })),
-      new inquirer.Separator(),
-      { name: chalk.yellow('Return to file shares list'), value: 'main' }
-    ];
+    // Group log files by base name
+    const fileGroups = {};
+    const nonGroupedItems = [];
     
-    // Prompt user to select a file/directory
+    // Patterns for log files
+    const logPattern1 = /^(.+?\.log)\.([0-9-]+)\.(\d+)$/; // Matches: name.log.date.number
+    const logPattern2 = /^(.+?\.log)\.([0-9-]+)$/;        // Matches: name.log.date
+    
+    items.forEach(item => {
+      if (!item.isDirectory) {
+        let match = item.name.match(logPattern1);
+        
+        // If first pattern doesn't match, try the second pattern
+        if (!match) {
+          match = item.name.match(logPattern2);
+        }
+        
+        if (match) {
+          const baseName = match[1]; // The <name>.log part
+          
+          if (!fileGroups[baseName]) {
+            fileGroups[baseName] = [];
+          }
+          fileGroups[baseName].push(item);
+        } else {
+          nonGroupedItems.push(item);
+        }
+      } else {
+        nonGroupedItems.push(item);
+      }
+    });
+    
+    // Sort items within each group by date and number (newest first)
+    Object.keys(fileGroups).forEach(group => {
+      fileGroups[group].sort((a, b) => {
+        const matchA = a.name.match(logPattern1) || a.name.match(logPattern2);
+        const matchB = b.name.match(logPattern1) || b.name.match(logPattern2);
+        
+        if (!matchA || !matchB) return 0;
+        
+        // Compare dates first
+        const dateA = matchA[2];
+        const dateB = matchB[2];
+        
+        if (dateA !== dateB) {
+          return dateB.localeCompare(dateA); // Newer dates first
+        }
+        
+        // If dates are the same and both have a number part, compare by number
+        if (matchA[3] && matchB[3]) {
+          const numA = parseInt(matchA[3], 10);
+          const numB = parseInt(matchB[3], 10);
+          return numB - numA; // Higher numbers (newer) first
+        }
+        
+        return 0;
+      });
+    });
+
+    // Create choices for inquirer, with grouped log files
+    let choices = [];
+    
+    // Add "go back" option if in a subdirectory
+    if (directory) {
+      choices.push({ name: chalk.blue('.. (Go back)'), value: 'back' });
+    }
+    
+    // Add directories first
+    nonGroupedItems.filter(item => item.isDirectory).forEach(item => {
+      choices.push({
+        name: `${chalk.blue('+ ')}${item.name}`,
+        value: item
+      });
+    });
+    
+    // Add grouped log files with expandable sections
+    Object.keys(fileGroups).sort().forEach(groupName => {
+      const group = fileGroups[groupName];
+      
+      // If there's only one file in the group and it's a direct match for the name, don't create a group
+      if (group.length === 1 && group[0].name === groupName) {
+        choices.push({
+          name: `- ${group[0].name}`,
+          value: group[0]
+        });
+      } else {
+        // Add the group as a selectable item (even if it has only one file)
+        choices.push({
+          name: `${chalk.yellow('📁 ')} ${groupName} (${group.length} log files)`,
+          value: { isGroup: true, name: groupName, files: group }
+        });
+      }
+    });
+    
+    // Add non-grouped files
+    nonGroupedItems.filter(item => !item.isDirectory).forEach(item => {
+      // Skip files that are already in groups
+      if (!Object.values(fileGroups).flat().some(f => f.name === item.name)) {
+        choices.push({
+          name: `- ${item.name}`,
+          value: item
+        });
+      }
+    });
+    
+    // Add final navigation options
+    choices.push(new inquirer.Separator());
+    choices.push({ name: chalk.yellow('Return to file shares list'), value: 'main' });
+    
+    // Prompt user to select an item
     const { selectedItem } = await inquirer.prompt([
       {
         type: 'list',
         name: 'selectedItem',
         message: 'Select an item:',
-        pageSize: 40, // Show more items at once
+        pageSize: 40,
         choices: choices
       }
     ]);
     
+    // Handle selection based on type
     if (selectedItem === 'back') {
       // Go back to parent directory
       if (directory) {
@@ -193,6 +293,9 @@ async function browseShareContents(shareName, directory = '') {
     } else if (selectedItem === 'main') {
       // Return to file shares list
       await browseFileShares();
+    } else if (selectedItem.isGroup) {
+      // Selected a file group, display files in the group
+      await browseFileGroup(shareName, directory, selectedItem);
     } else if (selectedItem.isDirectory) {
       // Navigate into selected directory
       const newPath = directory ? `${directory}/${selectedItem.name}` : selectedItem.name;
@@ -208,6 +311,51 @@ async function browseShareContents(shareName, directory = '') {
   } catch (error) {
     console.error(chalk.red(`Error browsing ${shareName}: ${error.message}`));
     await browseFileShares();
+  }
+}
+
+/**
+ * Browse files within a grouped set of log files
+ */
+async function browseFileGroup(shareName, directory, group) {
+  try {
+    console.log(chalk.yellow(`\nLog files in group: ${group.name}`));
+    console.log(`${chalk.dim('Total files:')} ${group.files.length}\n`);
+    
+    // Create choices for the group's files
+    const choices = [
+      { name: chalk.blue('.. (Back to file list)'), value: 'back' },
+      ...group.files.map(file => ({
+        name: `- ${file.name}`,
+        value: file
+      }))
+    ];
+    
+    // Prompt user to select a file
+    const { selectedFile } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'selectedFile',
+        message: `Select a log file from the ${group.name} group:`,
+        pageSize: 40,
+        choices: choices
+      }
+    ]);
+    
+    if (selectedFile === 'back') {
+      // Go back to the directory view
+      await browseShareContents(shareName, directory);
+    } else {
+      // Display the selected file
+      const path = directory ? `${directory}/${selectedFile.name}` : selectedFile.name;
+      await displayFile(shareName, path);
+      
+      // After viewing file, return to the group
+      await browseFileGroup(shareName, directory, group);
+    }
+  } catch (error) {
+    console.error(chalk.red(`Error browsing file group: ${error.message}`));
+    await browseShareContents(shareName, directory);
   }
 }
 
