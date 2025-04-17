@@ -102,9 +102,9 @@ function highlightLogLine(line) {
     return chalk.blue(line);
   }
   
-  // Highlight debug patterns
+  // Highlight debug patterns - changed from gray to cyan for better visibility on dark terminals
   if (/debug|trace|verbose/i.test(line)) {
-    return chalk.gray(line);
+    return chalk.cyan(line);
   }
   
   // Highlight success patterns
