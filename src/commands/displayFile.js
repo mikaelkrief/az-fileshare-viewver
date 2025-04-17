@@ -12,7 +12,8 @@ async function displayFile(shareName, filePath, streamMode = false) {
   try {
     console.log(chalk.cyan(`Loading file: ${filePath}...${streamMode ? ' (streaming mode)' : ''}`));
     
-    const shareClient = getShareClient(shareName);
+    // Always get a fresh share client (no caching) to ensure we get the latest file content
+    const shareClient = getShareClient(shareName, true);
     const filePathParts = filePath.split('/');
     const fileName = filePathParts.pop();
     const directoryPath = filePathParts.join('/');
@@ -26,7 +27,11 @@ async function displayFile(shareName, filePath, streamMode = false) {
     
     const fileClient = directoryClient.getFileClient(fileName);
 
-    // Initial file content download
+    // Get latest file properties to ensure we have the most recent content
+    const properties = await fileClient.getProperties();
+    console.log(chalk.gray(`File size: ${properties.contentLength} bytes, Last modified: ${properties.lastModified.toLocaleString()}`));
+
+    // File content download with no caching
     const downloadResponse = await fileClient.download(0);
     
     // Convert readableStream to string
@@ -53,10 +58,14 @@ async function displayFile(shareName, filePath, streamMode = false) {
       // Pass the shareName to the pager function
       const result = await displayContentInPager(fileContent, filePath, canStream, shareName);
       
-      // Check if we should switch to streaming mode
+      // Check if we should switch to streaming mode or refresh
       if (result && result.switchToStream) {
         // Recall this function with streaming mode enabled
         await displayFile(shareName, filePath, true);
+      } else if (result && result.refresh) {
+        console.log(chalk.cyan(`Refreshing file: ${filePath}...`));
+        // Recall this function to refresh the file content
+        await displayFile(shareName, filePath, false);
       }
     }
     
@@ -80,7 +89,7 @@ async function displayFile(shareName, filePath, streamMode = false) {
 function highlightLogLine(line) {
   // Highlight error patterns
   if (/error|exception|fail|fatal/i.test(line)) {
-    return chalk.red(line);
+    return chalk.red.bold(line);
   }
   
   // Highlight warning patterns
@@ -109,8 +118,8 @@ function highlightLogLine(line) {
       (match) => chalk.cyan(match));
   }
   
-  // Default - no highlighting
-  return line;
+  // Default - ensure all text is distinctly visible by using bright white color
+  return chalk.whiteBright(line);
 }
 
 /**
@@ -195,6 +204,9 @@ async function displayContentInPager(content, fileName, canStream = false, share
     fullUnicode: true
   });
   
+  // Add search mode state variable
+  let searchMode = false;
+  
   // Determine file type and apply formatting
   const isJson = isJsonFile(content, fileName);
   const isLog = isLogFile(content, fileName);
@@ -207,7 +219,8 @@ async function displayContentInPager(content, fileName, canStream = false, share
   } else if (isLog) {
     formattedLines = content.split('\n').map(line => highlightLogLine(line));
   } else {
-    formattedLines = content.split('\n');
+    // Apply whiteBright to all lines for non-log, non-JSON files
+    formattedLines = content.split('\n').map(line => chalk.whiteBright(line));
   }
   
   // Create a log widget for displaying file contents
@@ -257,14 +270,14 @@ async function displayContentInPager(content, fileName, canStream = false, share
     }
   });
   
-  // Add instructions with streaming option if available
+  // Add instructions with streaming and refresh options if available
   const instructions = blessed.box({
     parent: screen,
     bottom: 0,
     left: 0,
     width: '100%',
     height: 1,
-    content: ` ↑/↓/PgUp/PgDn: Scroll | /: Search | n/N: Next/Prev Match | q: Quit ${canStream ? ' | s: Stream' : ''} `,
+    content: ` ↑/↓/PgUp/PgDn: Scroll | /: Search | n/N: Next/Prev Match | r: Refresh | q: Quit ${canStream ? ' | s: Stream' : ''} `,
     style: {
       fg: 'black',
       bg: 'green'
@@ -298,13 +311,21 @@ async function displayContentInPager(content, fileName, canStream = false, share
     });
   }
   
+  // Add refresh functionality
+  screen.key(['r'], function() {
+    screen.destroy();
+    return new Promise(resolve => {
+      resolve({ refresh: true });
+    });
+  });
+  
   // Wait for the user to quit or switch to streaming mode
   return new Promise(resolve => {
     // Quit handler
     screen.key(['q', 'escape'], function() {
       if (!searchMode) {
         screen.destroy();
-        resolve({ switchToStream: false });
+        resolve({ switchToStream: false, refresh: false });
       }
     });
 
@@ -312,9 +333,15 @@ async function displayContentInPager(content, fileName, canStream = false, share
     if (canStream) {
       screen.key(['s'], function() {
         screen.destroy();
-        resolve({ switchToStream: true });
+        resolve({ switchToStream: true, refresh: false });
       });
     }
+    
+    // Add the refresh handler
+    screen.key(['r'], function() {
+      screen.destroy();
+      resolve({ switchToStream: false, refresh: true });
+    });
   });
 }
 
@@ -427,16 +454,16 @@ async function displayContentWithStreaming(initialContent, fileName, fileClient)
     if (isPaused) return;
     
     try {
-      // First get the file properties to check size
-      const properties = await fileClient.getProperties();
+      // Always get the latest file properties to prevent caching issues
+      const properties = await fileClient.getProperties({_bypassCache: true});
       const fileSize = properties.contentLength;
       
       // Only try to read if there's new content
       if (fileSize > currentSize) {
         logWidget.add(chalk.cyan(`[${new Date().toLocaleTimeString()}] New content detected (${fileSize - currentSize} bytes)`));
         
-        // Download only the new content
-        const downloadResponse = await fileClient.download(currentSize, fileSize - currentSize);
+        // Download only the new content - with cache bypass option
+        const downloadResponse = await fileClient.download(currentSize, fileSize - currentSize, {_bypassCache: true});
         
         const chunks = [];
         for await (const chunk of downloadResponse.readableStreamBody) {
@@ -449,6 +476,7 @@ async function displayContentWithStreaming(initialContent, fileName, fileClient)
           
           newContent.split('\n').forEach(line => {
             if (line.trim()) { // Skip empty lines
+              // Ensure all new content is also properly highlighted
               logWidget.add(highlightLogLine(line));
             }
           });
@@ -474,7 +502,7 @@ async function displayContentWithStreaming(initialContent, fileName, fileClient)
       // Reset our position if we got a range error - the file might have been truncated
       if (error.message.includes('range specified is invalid')) {
         try {
-          const properties = await fileClient.getProperties();
+          const properties = await fileClient.getProperties({_bypassCache: true});
           currentSize = properties.contentLength;
           logWidget.add(chalk.yellow(`[${new Date().toLocaleTimeString()}] Resetting file position to ${currentSize} bytes`));
           screen.render();

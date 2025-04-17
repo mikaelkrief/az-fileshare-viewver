@@ -244,7 +244,7 @@ async function browseShareContents(shareName, directory = '') {
       // If there's only one file in the group and it's a direct match for the name, don't create a group
       if (group.length === 1 && group[0].name === groupName) {
         choices.push({
-          name: `- ${group[0].name}`,
+          name: `${chalk.cyan('📄 ')}${group[0].name}`,
           value: group[0]
         });
       } else {
@@ -261,7 +261,7 @@ async function browseShareContents(shareName, directory = '') {
       // Skip files that are already in groups
       if (!Object.values(fileGroups).flat().some(f => f.name === item.name)) {
         choices.push({
-          name: `- ${item.name}`,
+          name: `${chalk.cyan('📄 ')}${item.name}`,
           value: item
         });
       }
@@ -340,7 +340,7 @@ async function browseFileGroup(shareName, directory, group) {
     // Add all files
     group.files.forEach(file => {
       choices.push({
-        name: `- ${file.name}`,
+        name: `${chalk.cyan('📄 ')}${file.name}`,
         value: file
       });
     });

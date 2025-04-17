@@ -5,13 +5,14 @@ let fileServiceClients = {};
 
 /**
  * Get a FileServiceClient for Azure Storage
+ * @param {boolean} noCache - If true, creates a new client instead of using cached one
  * @returns {ShareServiceClient} FileServiceClient for Azure Storage
  */
-function getFileServiceClient() {
+function getFileServiceClient(noCache = false) {
   const account = getCurrentAccount();
   const accountName = account.accountName;
   
-  if (fileServiceClients[accountName]) {
+  if (!noCache && fileServiceClients[accountName]) {
     return fileServiceClients[accountName];
   }
 
@@ -26,25 +27,39 @@ function getFileServiceClient() {
   );
 
   // Create a service client
-  fileServiceClients[accountName] = new ShareServiceClient(
+  const client = new ShareServiceClient(
     `https://${account.accountName}.file.core.windows.net`,
     credential
   );
   
-  return fileServiceClients[accountName];
+  // Only cache the client if noCache is false
+  if (!noCache) {
+    fileServiceClients[accountName] = client;
+  }
+  
+  return client;
 }
 
 /**
  * Get a ShareClient for a specific file share
  * @param {string} shareName - Name of the file share
+ * @param {boolean} noCache - If true, creates a new client instead of using cached one
  * @returns {ShareClient} ShareClient for the specified file share
  */
-function getShareClient(shareName) {
-  const serviceClient = getFileServiceClient();
+function getShareClient(shareName, noCache = false) {
+  const serviceClient = getFileServiceClient(noCache);
   return serviceClient.getShareClient(shareName);
+}
+
+/**
+ * Clear all cached file service clients
+ */
+function clearFileServiceCache() {
+  fileServiceClients = {};
 }
 
 module.exports = {
   getFileServiceClient,
-  getShareClient
+  getShareClient,
+  clearFileServiceCache
 };
